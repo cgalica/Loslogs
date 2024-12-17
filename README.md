@@ -1,0 +1,2 @@
+# Loslogs
+logsAnalizador
