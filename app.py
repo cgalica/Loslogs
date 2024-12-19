@@ -1,8 +1,13 @@
 import streamlit as st
+# Configurar el diseño de la página en ancho completo
+st.set_page_config(layout="wide")
 import pandas as pd
 import re
 from io import StringIO
 import matplotlib.pyplot as plt
+from st_aggrid import AgGrid
+from st_aggrid.grid_options_builder import GridOptionsBuilder
+from st_aggrid.shared import GridUpdateMode
 
 # Configuración de matplotlib
 plt.style.use('seaborn-v0_8-darkgrid')
@@ -36,6 +41,9 @@ def detectar_columnas_ip(df):
             columnas_ip.append(column)
     return columnas_ip
 
+# Define constant for "Código"
+CODIGO_COLUMN = "Código"
+
 # Procesamiento y análisis
 if uploaded_file:
     log_type = st.sidebar.selectbox("Selecciona el tipo de log", ["IIS", "Apache", "Custom"])
@@ -57,7 +65,7 @@ if uploaded_file:
 
     # Procesar logs Apache
     elif log_type == "Apache":
-        log_pattern = r'(\d+\.\d+\.\d+\.\d+) - - \[(.+?)\] "(\w+) (.+?) HTTP/\d.\d" (\d{3}) (\d+)'
+        log_pattern = r'(\d+\.\d+\.\d+\.\d+) - - \[(.+?)\] \"(\w+) (.+?) HTTP/\d.\d\" (\d{3}) (\d+)'
         uploaded_file.seek(0)
         log_lines = uploaded_file.getvalue().decode("utf-8").splitlines()
         parsed_lines = [
@@ -65,7 +73,7 @@ if uploaded_file:
             for line in log_lines if re.match(log_pattern, line)
         ]
         if parsed_lines:
-            log_data = pd.DataFrame(parsed_lines, columns=["IP", "Fecha", "Método", "URL", "Código", "Bytes"])
+            log_data = pd.DataFrame(parsed_lines, columns=["IP", "Fecha", "Método", "URL", CODIGO_COLUMN, "Bytes"])
             log_data["Fecha"] = pd.to_datetime(log_data["Fecha"], format="%d/%b/%Y:%H:%M:%S %z", errors="coerce")
 
     # Procesar logs personalizados
@@ -83,80 +91,72 @@ if uploaded_file:
             on_bad_lines='skip'
         )
 
-    # Limpiar datos
+    # Limpiar datos y verificar si hay datos
     if log_data is not None:
         log_data = limpiar_dataframe(log_data)
 
-    # Página de análisis de datos
-    if menu == "Análisis de Datos":
-        st.write("### Datos Cargados:")
-        st.dataframe(log_data)
+        # Página de análisis de datos
+        if menu == "Análisis de Datos":
+            st.write("### Datos con Filtros Interactivos:")
 
-        # Filtros dinámicos
-        with st.expander("Aplicar filtros", expanded=True):
-            filters = {}
+            # Configurar opciones de AgGrid
+            gb = GridOptionsBuilder.from_dataframe(log_data)
+            gb.configure_pagination(paginationAutoPageSize=True)  # Activar paginación
+            gb.configure_side_bar()  # Activar barra lateral con filtros
+            gb.configure_default_column(wrapHeaderText=True, autoHeight=True)
+            gb.configure_grid_options(domLayout='normal')
 
-            for column in log_data.columns:
-                column_type = log_data[column].dtype
+            grid_options = gb.build()
 
-                if pd.api.types.is_numeric_dtype(log_data[column]):
-                    min_val, max_val = log_data[column].min(), log_data[column].max()
-                    if min_val < max_val:  # Evita error en sliders iguales
-                        rango = st.slider(
-                            f"Rango de {column}",
-                            min_value=float(min_val),
-                            max_value=float(max_val),
-                            value=(float(min_val), float(max_val))
-                        )
-                        filters[column] = (log_data[column] >= rango[0]) & (log_data[column] <= rango[1])
 
-                elif pd.api.types.is_string_dtype(log_data[column]):
-                    texto = st.text_input(f"Buscar en {column}:")
-                    if texto:
-                        filters[column] = log_data[column].str.contains(texto, case=False, na=False)
+            # Mostrar la tabla con AgGrid
+            AgGrid(
+                log_data,
+                gridOptions=grid_options,
+                update_mode=GridUpdateMode.SELECTION_CHANGED,
+                fit_columns_on_grid_load=True,
+                height=600,  # Ajustar altura de la tabla
+                theme="streamlit"  # Tema para la tabla
+            )
 
-            for col, condition in filters.items():
-                log_data = log_data[condition]
+        # Página de gráficos
+        elif menu == "Gráficos":
+            if log_data is not None and not log_data.empty:
+                st.write("## Visualizaciones")
 
-        st.write("### Datos Filtrados:")
-        st.dataframe(log_data)
+                # Distribución de IPs
+                columnas_ip = detectar_columnas_ip(log_data)
+                if columnas_ip:
+                    for col in columnas_ip:
+                        ip_counts = log_data[col].value_counts().head(10)
+                        st.write(f"### Top 10 IPs en la columna {col}:")
+                        fig, ax = plt.subplots()
+                        ip_counts.plot(kind='bar', ax=ax)
+                        ax.set_title(f"Distribución de IPs en {col}")
+                        st.pyplot(fig)
 
-    # Página de gráficos
-    elif menu == "Gráficos":
-        if log_data is not None:
-            st.write("## Visualizaciones")
-
-            # Distribución de IPs
-            columnas_ip = detectar_columnas_ip(log_data)
-            if columnas_ip:
-                for col in columnas_ip:
-                    ip_counts = log_data[col].value_counts().head(10)
-                    st.write(f"### Top 10 IPs en la columna {col}:")
+                # Distribución de códigos HTTP
+                if CODIGO_COLUMN in log_data.columns:
+                    codigo_counts = log_data[CODIGO_COLUMN].value_counts()
+                    st.write("### Distribución de Códigos HTTP")
                     fig, ax = plt.subplots()
-                    ip_counts.plot(kind='bar', ax=ax)
-                    ax.set_title(f"Distribución de IPs en {col}")
+                    codigo_counts.plot(kind='bar', ax=ax)
+                    ax.set_title("Distribución de Códigos HTTP")
                     st.pyplot(fig)
 
-            # Distribución de códigos HTTP
-            if "Código" in log_data.columns:
-                codigo_counts = log_data["Código"].value_counts()
-                st.write("### Distribución de Códigos HTTP")
-                fig, ax = plt.subplots()
-                codigo_counts.plot(kind='bar', ax=ax)
-                ax.set_title("Distribución de Códigos HTTP")
-                st.pyplot(fig)
-
-            # Análisis temporal
-            if "Fecha" in log_data.columns:
-                log_data["Fecha"] = pd.to_datetime(log_data["Fecha"], errors="coerce")
-                if log_data["Fecha"].notna().any():
-                    log_data = log_data.set_index("Fecha")
-                    st.write("### Análisis Temporal")
-                    temporal_counts = log_data.resample("D").size()
-                    fig, ax = plt.subplots()
-                    temporal_counts.plot(kind='line', ax=ax)
-                    ax.set_title("Eventos por Día")
-                    st.pyplot(fig)
+                # Análisis temporal
+                if "Fecha" in log_data.columns:
+                    log_data["Fecha"] = pd.to_datetime(log_data["Fecha"], errors="coerce")
+                    if log_data["Fecha"].notna().any():
+                        log_data = log_data.set_index("Fecha")
+                        st.write("### Análisis Temporal")
+                        temporal_counts = log_data.resample("D").size()
+                        fig, ax = plt.subplots()
+                        temporal_counts.plot(kind='line', ax=ax)
+                        ax.set_title("Eventos por Día")
+                        st.pyplot(fig)
+            else:
+                st.write("No hay datos disponibles para generar gráficos.")
 
 else:
     st.write("Sube un archivo de log para comenzar.")
