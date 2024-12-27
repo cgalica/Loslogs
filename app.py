@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 from st_aggrid import AgGrid
 from st_aggrid.grid_options_builder import GridOptionsBuilder
 from st_aggrid.shared import GridUpdateMode
+import requests  # Para geolocalización
+import pydeck as pdk
 
 # Configuración de matplotlib
 plt.style.use('seaborn-v0_8-darkgrid')
@@ -16,7 +18,7 @@ plt.style.use('seaborn-v0_8-darkgrid')
 st.title("Herramienta de análisis de logs")
 
 # Configuración de navegación
-menu = st.sidebar.radio("Selecciona una página", ["Análisis de Datos", "Gráficos"])
+menu = st.sidebar.radio("Selecciona una página", ["Análisis de Datos", "Gráficos", "Geolocalización"])
 
 # Subir archivo
 uploaded_file = st.sidebar.file_uploader("Sube un archivo de log", type=["log", "txt", "csv"])
@@ -40,6 +42,28 @@ def detectar_columnas_ip(df):
         if df[column].dropna().apply(lambda x: bool(ip_pattern.match(str(x)))).any():
             columnas_ip.append(column)
     return columnas_ip
+
+# Función para geolocalizar una IP usando ipinfo.io
+def geolocalizar_ip(ip, token="AQUI VA LA KEY"):
+    url = f"https://ipinfo.io/{ip}?token={token}"
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            loc = data.get("loc", "0,0").split(",")
+            return {
+                "IP": ip,
+                "Ciudad": data.get("city", "Desconocido"),
+                "Región": data.get("region", "Desconocido"),
+                "País": data.get("country", "Desconocido"),
+                "Latitud": float(loc[0]) if len(loc) == 2 else None,
+                "Longitud": float(loc[1]) if len(loc) == 2 else None,
+                "ISP": data.get("org", "Desconocido"),
+            }
+        else:
+            return {"IP": ip, "Error": f"No se pudo obtener información: {response.status_code}"}
+    except requests.RequestException as e:
+        return {"IP": ip, "Error": str(e)}
 
 # Define constant for "Código"
 CODIGO_COLUMN = "Código"
@@ -99,15 +123,12 @@ if uploaded_file:
         if menu == "Análisis de Datos":
             st.write("### Datos con Filtros Interactivos:")
 
-            # Configurar opciones de AgGrid
+            # Configurar opciones de AgGrid (Community Edition compatible)
             gb = GridOptionsBuilder.from_dataframe(log_data)
             gb.configure_pagination(paginationAutoPageSize=True)  # Activar paginación
-            gb.configure_side_bar()  # Activar barra lateral con filtros
-            gb.configure_default_column(wrapHeaderText=True, autoHeight=True)
-            gb.configure_grid_options(domLayout='normal')
+            gb.configure_default_column(wrapHeaderText=True, autoHeight=True, editable=False, filter=True, sortable=True, resizable=True)
 
             grid_options = gb.build()
-
 
             # Mostrar la tabla con AgGrid
             AgGrid(
@@ -115,8 +136,7 @@ if uploaded_file:
                 gridOptions=grid_options,
                 update_mode=GridUpdateMode.SELECTION_CHANGED,
                 fit_columns_on_grid_load=True,
-                height=600,  # Ajustar altura de la tabla
-                theme="streamlit"  # Tema para la tabla
+                theme="streamlit"  # Tema gratuito compatible
             )
 
         # Página de gráficos
@@ -158,5 +178,50 @@ if uploaded_file:
             else:
                 st.write("No hay datos disponibles para generar gráficos.")
 
+    # Nueva sección de geolocalización
+    if menu == "Geolocalización":
+        columnas_ip = detectar_columnas_ip(log_data)
+        if columnas_ip:
+            st.write("### Geolocalización de IPs")
+            col_ip = st.selectbox("Selecciona la columna con IPs a geolocalizar", columnas_ip)
+            if st.button("Geolocalizar IPs"):
+                ip_data = log_data[col_ip].dropna().unique()[:20]  # Limitar a 20 IPs
+                st.write("Procesando geolocalización, por favor espera...")
+                geolocalizaciones = [geolocalizar_ip(ip) for ip in ip_data]
+                geo_df = pd.DataFrame(geolocalizaciones)
+                
+                # Mostrar tabla con geolocalización
+                st.write("### Resultados de Geolocalización:")
+                st.dataframe(geo_df)
+
+                # Crear mapa interactivo con pydeck
+                st.write("### Mapa de Geolocalización:")
+                geo_df = geo_df.dropna(subset=["Latitud", "Longitud"])
+                geo_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    geo_df,
+                    get_position="[Longitud, Latitud]",
+                    get_radius=200000,
+                    get_color="[0, 0, 255, 160]",
+                    pickable=True
+                )
+                view_state = pdk.ViewState(
+                    latitude=geo_df["Latitud"].mean(),
+                    longitude=geo_df["Longitud"].mean(),
+                    zoom=2,
+                    pitch=0
+                )
+                r = pdk.Deck(layers=[geo_layer], initial_view_state=view_state, tooltip={"text": "{IP}\n{Ciudad}\n{ISP}"})
+                st.pydeck_chart(r)
+
+                # Descargar resultados como CSV
+                st.download_button(
+                    label="Descargar geolocalización como CSV",
+                    data=geo_df.to_csv(index=False).encode("utf-8"),
+                    file_name="geolocalizacion_ips.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.write("No se encontraron columnas con IPs.")
 else:
     st.write("Sube un archivo de log para comenzar.")
